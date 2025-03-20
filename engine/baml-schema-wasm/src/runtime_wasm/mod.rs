@@ -7,8 +7,10 @@ use baml_runtime::internal::llm_client::orchestrator::OrchestratorNode;
 use baml_runtime::internal::prompt_renderer::PromptRenderer;
 use baml_runtime::tracingv2::storage::storage::Collector;
 use baml_runtime::BamlSrcReader;
+use baml_runtime::FunctionResult;
 use baml_runtime::InternalRuntimeInterface;
 use baml_runtime::RenderCurlSettings;
+use baml_runtime::SerializedSpan;
 use baml_runtime::{
     internal::llm_client::LLMResponse, BamlRuntime, DiagnosticsError, IRHelper, RenderedPrompt,
 };
@@ -18,11 +20,15 @@ use baml_types::{BamlMediaType, BamlValue, GeneratorOutputType, TypeValue};
 use indexmap::IndexMap;
 use internal_baml_codegen::version_check::GeneratorType;
 use internal_baml_codegen::version_check::{check_version, VersionCheckMode};
+use internal_baml_core::internal_baml_diagnostics::Span;
+use internal_baml_core::ir::repr::Walker;
 use internal_llm_client::AllowedRoleMetadata;
 use jsonish::deserializer::deserialize_flags::Flag;
 use jsonish::BamlValueWithFlags;
 
 use baml_runtime::internal::llm_client::orchestrator::ExecutionScope;
+use futures::channel::mpsc;
+use futures::StreamExt;
 use itertools::join;
 use js_sys::Promise;
 use js_sys::Uint8Array;
@@ -882,6 +888,7 @@ fn get_dummy_value(
             Some(format!("({},)", dummy))
         }
         baml_runtime::FieldType::Optional(_) => None,
+        baml_runtime::FieldType::Arrow(_) => None,
         baml_runtime::FieldType::WithMetadata { base, .. } => {
             get_dummy_value(indent, allow_multiline, base)
         }
@@ -945,6 +952,17 @@ impl WasmRuntime {
             .internal()
             .ir()
             .walk_functions()
+            .chain(
+                self.runtime
+                    .internal()
+                    .ir()
+                    .expr_fns_as_functions()
+                    .iter()
+                    .map(|f| Walker {
+                        ir: &self.runtime.internal().ir(),
+                        item: f,
+                    }),
+            )
             .map(|f| {
                 let snippet = format!(
                     r#"test TestName {{
@@ -1700,6 +1718,75 @@ impl WasmFunction {
     }
 
     #[wasm_bindgen]
+    pub async fn run_test_with_expr_events(
+        &self,
+        rt: &mut WasmRuntime,
+        test_name: String,
+        on_partial_response: js_sys::Function,
+        get_baml_src_cb: js_sys::Function,
+        on_expr_event: js_sys::Function,
+    ) -> Result<WasmTestResponse, JsValue> {
+        log::info!("TEST LOGGING");
+        let rt = &rt.runtime;
+        let function_name = self.name.clone();
+
+        // Create the closure to handle partial responses:
+        let cb = Box::new(move |r: FunctionResult| {
+            let this = JsValue::NULL;
+            let res = WasmFunctionResponse {
+                function_response: r,
+            }
+            .into();
+            on_partial_response.call1(&this, &res).unwrap();
+        });
+
+        // Create the channel for expression events
+        let (tx, mut rx) = mpsc::unbounded::<Vec<SerializedSpan>>();
+
+        // Spawn a task to handle expression events
+        let on_expr_event_clone = on_expr_event.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            while let Some(spans) = rx.next().await
+            // .map_err(|e| {
+            //     log::error!("Error receiving spans: {e}");
+            //     panic!("Error receiving spans: {e}");
+            // })
+            // .unwrap()
+            {
+                log::info!("SPANS: {:#?}", spans);
+                let this = JsValue::NULL;
+                match serde_wasm_bindgen::to_value(&spans) {
+                    Ok(res) => {
+                        on_expr_event_clone.call1(&this, &res).expect("TODO");
+                    }
+                    Err(e) => {
+                        log::error!("Error serializing spans: {e}");
+                    }
+                }
+            }
+        });
+
+        // Create your evaluation context, etc.
+        let ctx = rt.create_ctx_manager(
+            BamlValue::String("wasm".to_string()),
+            js_fn_to_baml_src_reader(get_baml_src_cb),
+        );
+
+        // Pass the sender to run_test_with_expr_events
+        let (test_response, span) = rt
+            .run_test_with_expr_events(&function_name, &test_name, &ctx, Some(cb), Some(tx), None)
+            .await;
+
+        log::info!("test_response: {:#?}", test_response);
+
+        Ok(WasmTestResponse {
+            test_response,
+            span,
+            tracing_project_id: rt.env_vars().get("BOUNDARY_PROJECT_ID").cloned(),
+        })
+    }
+
+    #[wasm_bindgen]
     pub async fn run_test(
         &self,
         rt: &mut WasmRuntime,
@@ -1719,6 +1806,7 @@ impl WasmFunction {
             .into();
             on_partial_response.call1(&this, &res).unwrap();
         });
+        // let cb2: Option<Box<dyn Fn(_) -> ()>> = None;
 
         // Create your evaluation context, etc.
         let ctx = rt.create_ctx_manager(
@@ -1728,7 +1816,8 @@ impl WasmFunction {
 
         // Now pass collector_arc to your runtime's run_test
         let (test_response, span) = rt
-            .run_test(&function_name, &test_name, &ctx, Some(cb), None)
+            // .run_test(&function_name, &test_name, &ctx, Some(cb))
+            .run_test(&function_name, &test_name, &ctx, Some(cb), None) // TODO: Just guessing/testing.
             .await;
 
         log::info!("test_response: {:#?}", test_response);

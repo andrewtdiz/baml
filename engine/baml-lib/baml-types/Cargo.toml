@@ -18,8 +18,11 @@ unused_variables = "deny"
 anyhow.workspace = true
 clap.workspace = true
 derive_builder.workspace = true
+internal-baml-diagnostics = { path = "../diagnostics" }
+itertools = "0.13.0"
 log.workspace = true
 minijinja.workspace = true
+moniker.workspace = true
 once_cell.workspace = true
 secrecy.workspace = true
 serde.workspace = true

@@ -295,16 +295,14 @@ const plugin: BamlVSCodePlugin = {
     console.log('debugmode', isDebugMode())
     // serverModule = context.asAbsolutePath(path.join('../../packages/language-server/dist/src/bin'))
 
-    serverModule = context.asAbsolutePath(path.join('language-server', 'out', 'bin'))
-
-    console.log(`serverModules: ${serverModule}`)
-
     // The debug options for the server
     // --inspect=6009: runs the server in Node's Inspector mode so VS Code can attach to the server for debugging
     const debugOptions = {
       execArgv: ['--nolazy', '--inspect=6009'],
       env: { DEBUG: true },
     }
+
+    
 
     // If the extension is launched in debug mode then the debug server options are used
     // Otherwise the run options are used
@@ -463,6 +461,7 @@ const plugin: BamlVSCodePlugin = {
     return client.stop()
   },
 }
+
 
 export { telemetry }
 export default plugin
