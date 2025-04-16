@@ -77,24 +77,76 @@ impl std::fmt::Display for LiteralValue {
 
 /// FieldType represents the type of either a class field or a function arg.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum FieldType {
-    Primitive(TypeValue),
-    Enum(String),
-    Literal(LiteralValue),
-    Class(String),
-    List(Box<FieldType>),
-    Map(Box<FieldType>, Box<FieldType>),
-    Union(Vec<FieldType>),
-    Tuple(Vec<FieldType>),
-    Optional(Box<FieldType>),
-    RecursiveTypeAlias(String),
-    Arrow(Box<Arrow>),
-    WithMetadata {
-        base: Box<FieldType>,
-        constraints: Vec<Constraint>,
-        streaming_behavior: StreamingBehavior,
-    },
+pub enum FieldTypeWithMetadata<T> {
+    Primitive(TypeValue, T),
+    Enum(String, T),
+    Literal(LiteralValue, T),
+    Class(String, T),
+    List(Box<FieldTypeWithMetadata<T>>, T),
+    Map(
+        Box<FieldTypeWithMetadata<T>>,
+        Box<FieldTypeWithMetadata<T>>,
+        T,
+    ),
+    Union(Vec<FieldTypeWithMetadata<T>>, T),
+    Tuple(Vec<FieldTypeWithMetadata<T>>, T),
+    Optional(Box<FieldTypeWithMetadata<T>>, T),
+    RecursiveTypeAlias(String, T),
+    Arrow(Box<Arrow>, T),
 }
+
+impl<T> FieldTypeWithMetadata<T> {
+    fn meta(&self) -> &T {
+        match self {
+            Self::Primitive(_, meta) => meta,
+            Self::Enum(_, meta) => meta,
+            Self::Literal(_, meta) => meta,
+            Self::Class(_, meta) => meta,
+            Self::List(_, meta) => meta,
+            Self::Map(_, _, meta) => meta,
+            Self::Union(_, meta) => meta,
+            Self::Tuple(_, meta) => meta,
+            Self::Optional(_, meta) => meta,
+            Self::RecursiveTypeAlias(_, meta) => meta,
+            Self::Arrow(_, meta) => meta,
+        }
+    }
+}
+
+/// The metadata typically associated with a field type.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldTypeMetadata {
+    constraints: Vec<Constraint>,
+    streaming_behavior: StreamingBehavior,
+}
+
+impl Default for FieldTypeMetadata {
+    fn default() -> Self {
+        FieldTypeMetadata {
+            constraints: vec![],
+            streaming_behavior: StreamingBehavior::default(),
+        }
+    }
+}
+
+impl FieldTypeMetadata {
+    pub fn is_null(&self) -> bool {
+        self.constraints.is_empty() && self.streaming_behavior == StreamingBehavior::default()
+    }
+}
+
+impl std::fmt::Display for FieldTypeMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.constraints.is_empty() {
+            for constraint in &self.constraints {
+                write!(f, "{}, ", format!("{:?}", constraint))?;
+            }
+        }
+        write!(f, "{}", format!("{:?}", self.streaming_behavior))
+    }
+}
+
+type FieldType = FieldTypeWithMetadata<FieldTypeMetadata>;
 
 pub trait HasFieldType {
     fn field_type<'a>(&'a self) -> &'a FieldType;
@@ -110,12 +162,12 @@ pub struct Arrow {
 impl std::fmt::Display for FieldType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FieldType::Enum(name)
-            | FieldType::Class(name)
-            | FieldType::RecursiveTypeAlias(name) => write!(f, "{name}"),
-            FieldType::Primitive(t) => write!(f, "{t}"),
-            FieldType::Literal(v) => write!(f, "{v}"),
-            FieldType::Union(choices) => {
+            FieldType::Enum(name, _meta)
+            | FieldType::Class(name, _meta)
+            | FieldType::RecursiveTypeAlias(name, _meta) => write!(f, "{name}"),
+            FieldType::Primitive(t, _meta) => write!(f, "{t}"),
+            FieldType::Literal(v, _meta) => write!(f, "{v}"),
+            FieldType::Union(choices, _meta) => {
                 write!(
                     f,
                     "({})",
@@ -126,7 +178,7 @@ impl std::fmt::Display for FieldType {
                         .join(" | ")
                 )
             }
-            FieldType::Tuple(choices) => {
+            FieldType::Tuple(choices, _meta) => {
                 write!(
                     f,
                     "({})",
@@ -137,10 +189,10 @@ impl std::fmt::Display for FieldType {
                         .join(", ")
                 )
             }
-            FieldType::Map(k, v) => write!(f, "map<{k}, {v}>"),
-            FieldType::List(t) => write!(f, "{t}[]"),
-            FieldType::Optional(t) => write!(f, "{t}?"),
-            FieldType::Arrow(arrow) => write!(
+            FieldType::Map(k, v, _meta) => write!(f, "map<{k}, {v}>"),
+            FieldType::List(t, _meta) => write!(f, "{t}[]"),
+            FieldType::Optional(t, _meta) => write!(f, "{t}?"),
+            FieldType::Arrow(arrow, _meta) => write!(
                 f,
                 "({}) -> {}",
                 arrow
@@ -151,16 +203,19 @@ impl std::fmt::Display for FieldType {
                     .join(", "),
                 arrow.return_type.to_string()
             ),
-            FieldType::WithMetadata { base, .. } => base.fmt(f),
+        }?;
+        if !self.meta().is_null() {
+            write!(f, " ({})", self.meta())?;
         }
+        Ok(())
     }
 }
 
 impl FieldType {
     fn flatten(&self) -> Vec<FieldType> {
         match self {
-            FieldType::Union(inner) => inner.iter().flat_map(|t| t.flatten()).collect(),
-            FieldType::Optional(inner) => {
+            FieldType::Union(inner, _) => inner.iter().flat_map(|t| t.flatten()).collect(),
+            FieldType::Optional(inner._meta) => {
                 let mut values = inner.flatten();
                 values.push(FieldType::Primitive(TypeValue::Null));
                 values
